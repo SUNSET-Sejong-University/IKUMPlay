@@ -12,6 +12,7 @@ import re
 import spotipy
 import json
 from spotipy.oauth2 import SpotifyClientCredentials
+from syncedlyrics import *
 
 
 CLIENT_ID = "ab196aede1bc4799ae649981432632d0"
@@ -32,6 +33,7 @@ def spectrogram(data, width=40, height=15):
         line = "".join("█" if c >= level else " " for c in chunk)
         lines.append(line)
     return "\n".join(lines)
+
 
 def build_layout(song_name, lyrics, spectro_text):
     layout = Layout()
@@ -66,6 +68,7 @@ def build_layout(song_name, lyrics, spectro_text):
     
     return layout
 
+
 def play_song(song_file, lyrics):
     # init mixer
     mixer.init()
@@ -85,11 +88,18 @@ def play_song(song_file, lyrics):
         while mixer.music.get_busy():
             chunk = audio[pos:pos+step]
             spec = spectrogram(chunk, width=40, height=15)
-            layout = build_layout(os.path.basename(song_file), lyrics, spec)
+            
+            curr_ms = mixer.music.get_pos()
+            curr_sec = curr_ms / 1000.0
+            lyric_window = get_current_lyrics(lyrics, curr_sec)
+
+            layout = build_layout(os.path.basename(song_file), lyric_window, spec)
             live.update(layout)
+            
             pos += step
             time.sleep(0.1)
         
+
 def search_song(query):
     pattern = re.compile(query, re.IGNORECASE)
 
@@ -130,6 +140,46 @@ def download_audio(query, output_dir="downloads"):
         return mp3_file
 
 
+def parse_lrc(lrc_text):
+    """Convert raw LRC text into [(timestamp, line)] pairs."""
+    lines = []
+    for line in lrc_text.splitlines():
+        if line.startswith("["):
+            try:
+                timestamp, text = line.split("]", 1)
+                timestamp = timestamp[1:]
+                m, s = timestamp.split(":")
+                secs = int(m) * 60 + float(s)
+                lines.append((secs, text.strip()))
+            except:
+                continue
+    return sorted(lines, key=lambda x: x[0])
+
+
+def get_current_lyrics(lyrics, current_sec, window=2):
+    """Return a few lines around the current lyric."""
+    if not lyrics:
+        return ["(No synced lyrics available)"]
+
+    current_index = 0
+    for i, (ts, _)in enumerate(lyrics):
+        if ts <= current_sec:
+            current_index = i
+        else:
+            break
+    start = max(0, current_index - window)
+    end = min(len(lyrics), current_index + window + 1)
+
+    display_lines = []
+    for i in range(start, end):
+        ts, line = lyrics[i]
+        if i == current_index:
+            display_lines.append(f"[bold yellow]> {line} <[/bold yellow]")
+        else:
+            display_lines.append(line)
+    
+    return display_lines
+
 if __name__ == "__main__":
     song_name = input("Enter the song name: ")
     results = search_song(song_name)
@@ -138,11 +188,15 @@ if __name__ == "__main__":
         query = f"{title} by {artists}"
         song_file = download_audio(query)      
         print(f"✅ Downloaded: {song_file}")
-        lyrics = [
-            "Line 1 of lyrics...",
-            "Line 2 of lyrics...",
-            "Line 3 of lyrics..."
-        ]
+        
+        #fetch synced lyrics
+        try:
+            lrc_text = search(f"{title} {artists}", synced_only=True)
+            lyrics = parse_lrc(lrc_text) if lrc_text else []
+        except Exception as e:
+            print(f"⚠️  Could not fetch synced lyrics: {e}")
+            lyrics = []
+
         play_song(song_file, lyrics)
 
     else:
