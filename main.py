@@ -13,6 +13,7 @@ import spotipy
 import json
 from spotipy.oauth2 import SpotifyClientCredentials
 from syncedlyrics import *
+import sys, termios, tty, select
 
 
 CLIENT_ID = "ab196aede1bc4799ae649981432632d0"
@@ -22,10 +23,12 @@ sp = spotipy.Spotify(auth_manager=SpotifyClientCredentials(client_id=CLIENT_ID, 
 
 console = Console()
 
-def spectrogram(data, width=40, height=15):
-    """Turn audio data into ASCII spectrogram bars."""
+def spectrogram(data, width=40, height=None):
+    """Turn audio data into ASCII spectrogram bars."""  
     if len(data) == 0:
         return ""
+    if height is None:
+        height = max(5, console.size.height - 10)
     chunk = np.abs(data[:width])
     chunk = (chunk / np.max(chunk)) * height
     lines = []
@@ -34,13 +37,25 @@ def spectrogram(data, width=40, height=15):
         lines.append(line)
     return "\n".join(lines)
 
-
-def build_layout(song_name, lyrics, spectro_text):
+def get_key():
+    """Non-blocking code for key read from stdin"""
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    try:
+        tty.setcbreak(fd)
+        if select.select([sys.stdin], [], [], 0)[0]:
+            return sys.stdin.read(1)
+    finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+    return None
+            
+def build_layout(song_name, lyrics, spectro_text, disc_frame):
     layout = Layout()
 
     layout.split(
         Layout(name="header", size=3),
         Layout(name="main", ratio=1),
+        Layout(name="controls", size=3),
         Layout(name="footer", size=3),
     )
 
@@ -51,8 +66,9 @@ def build_layout(song_name, lyrics, spectro_text):
 
     # main split
     layout["main"].split_row(
-        Layout(name="spectro", ratio=1),
+        Layout(name="ascii-disc", ratio=1),
         Layout(name="lyrics", ratio=1),
+        Layout(name="spectro", ratio=1),
     )
 
     layout["spectro"].update(
@@ -61,10 +77,17 @@ def build_layout(song_name, lyrics, spectro_text):
     layout["lyrics"].update(
         Panel("\n".join(lyrics), title="Lyrics", border_style="magenta")
     )
+    layout["ascii-disc"].update(
+        Panel(Align.center(disc_frame), title="", border_style="green")
+    )
 
+    # controls
+    layout["controls"].update(
+        Panel(Align.center("[bold yellow]Controls: [P] Play/Pause  [R] Reset  [S] Stop  [Q] Quit"))
+    )
     # footer
     layout["footer"].update(
-        Panel(Align.center("[yellow]Built with ❤️ by SUNSET-Sejong University")))
+        Panel(Align.center("[yellow]Built with ❤️  by SUNSET-Sejong University")))
     
     return layout
 
@@ -73,7 +96,6 @@ def play_song(song_file, lyrics):
     # init mixer
     mixer.init()
     mixer.music.load(song_file)
-    mixer.music.play()
 
     # also load wav for analysis
     wav_file = "temp.wav"
@@ -83,17 +105,74 @@ def play_song(song_file, lyrics):
     audio = audio / np.max(np.abs(audio))  # normalize
     step = rate // 10  # ~0.1s per step
 
+    # load disc frames
+    with open("ascii_arts.json", "r") as f:
+        art_data = json.load(f)
+    disc_frames = list(art_data["disk_frames"].values())
+
+    pos = 0
+    frame_idx = 0  # index for disc frames
+    paused = False
+    stopped = False
+
     with Live(console=console, refresh_per_second=10, screen=True) as live:
-        pos = 0
-        while mixer.music.get_busy():
-            chunk = audio[pos:pos+step]
-            spec = spectrogram(chunk, width=40, height=15)
+        #draw initial layout first
+        initial_spec = spectrogram(audio[:step], width=40, height=None)
+        initial_frame = "\n".join(disc_frames[0])
+        initial_layout = build_layout(
+            os.path.basename(song_file),
+            get_current_lyrics(lyrics, 0),
+            initial_spec,
+            initial_frame
+        )
+        live.update(initial_layout)  
+
+        #start playback after UI is ready
+        mixer.music.play()
+        
+        while not stopped and (mixer.music.get_busy() or paused):
+            key = get_key()
+            if key:
+                key = key.lower()
+                if key == 'p':  #play/pause
+                    if paused:
+                        mixer.music.unpause()
+                        paused = False
+                    else:
+                        mixer.music.pause()
+                        paused = True
+                elif key == 'r':  #reset
+                    mixer.music.stop()
+                    mixer.music.play()
+                    pos = 0
+                    frame_idx = 0
+                    paused = False
+                elif key == 'q': #Quit
+                    mixer.music.stop()
+                    stopped = True
+                    break
+            if paused:
+                time.sleep(0.1)
+                continue
             
+            
+            #Update audio chunk and UI
+            chunk = audio[pos:pos+step]
+            spec = spectrogram(chunk, width=40, height=None)
+                
             curr_ms = mixer.music.get_pos()
             curr_sec = curr_ms / 1000.0
             lyric_window = get_current_lyrics(lyrics, curr_sec)
-
-            layout = build_layout(os.path.basename(song_file), lyric_window, spec)
+            
+            frame = disc_frames[frame_idx % len(disc_frames)]
+            frame_text = "\n".join(frame)   # turn list of strings into proper ASCII art
+            frame_idx += 1
+            layout = build_layout(
+                os.path.basename(song_file), 
+                lyric_window, 
+                spec,
+                frame_text
+            )
             live.update(layout)
             
             pos += step
@@ -196,7 +275,7 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"⚠️  Could not fetch synced lyrics: {e}")
             lyrics = []
-
+  
         play_song(song_file, lyrics)
 
     else:
