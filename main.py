@@ -1,4 +1,4 @@
-import os, time
+import sys, os, time
 import numpy as np
 from pygame import mixer
 from scipy.io.wavfile import read
@@ -13,8 +13,15 @@ import spotipy
 import json
 from spotipy.oauth2 import SpotifyClientCredentials
 from syncedlyrics import *
-import sys, termios, tty, select
 
+#Detect platform
+ON_WINDOWS = os.name == "nt"
+
+if ON_WINDOWS:
+    import msvcrt
+else:
+    import curses
+    import threading
 
 CLIENT_ID = "ab196aede1bc4799ae649981432632d0"
 CLIENT_SECRET = "e631f38732ba4c608f2982bdb41f9cb4"
@@ -22,6 +29,43 @@ CLIENT_SECRET = "e631f38732ba4c608f2982bdb41f9cb4"
 sp = spotipy.Spotify(auth_manager=SpotifyClientCredentials(client_id=CLIENT_ID, client_secret=CLIENT_SECRET))
 
 console = Console()
+
+def init_input():
+    if not ON_WINDOWS:
+        import termios, tty, sys
+        import fcntl
+    
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+        tty.setcbreak(fd)
+
+        fl = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
+        return (fd, old_settings, fl)
+    return None
+
+def cleanup_input(stdscr):
+    if not ON_WINDOWS and stdscr:
+        import termios, fcntl
+        fd, old_settings, fl = stdscr
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+        fcntl.fcntl(fd, fcntl.F_SETFL, fl)
+
+def get_key(stdscr=None):
+    if ON_WINDOWS:
+        if msvcrt.kbhit():
+            try:
+                return msvcrt.getch().decode("utf-8").lower()
+            except UnicodeDecodeError:
+                return None
+    else:
+        try:
+            ch = sys.stdin.read(1)
+            if ch:
+                return ch.lower()
+        except (IOError, OSError):
+            pass
+    return None
 
 def spectrogram(data, width=40, height=None):
     """Turn audio data into ASCII spectrogram bars."""  
@@ -37,18 +81,7 @@ def spectrogram(data, width=40, height=None):
         lines.append(line)
     return "\n".join(lines)
 
-def get_key():
-    """Non-blocking code for key read from stdin"""
-    fd = sys.stdin.fileno()
-    old_settings = termios.tcgetattr(fd)
-    try:
-        tty.setcbreak(fd)
-        if select.select([sys.stdin], [], [], 0)[0]:
-            return sys.stdin.read(1)
-    finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-    return None
-            
+
 def build_layout(song_name, lyrics, spectro_text, disc_frame):
     layout = Layout()
 
@@ -83,7 +116,7 @@ def build_layout(song_name, lyrics, spectro_text, disc_frame):
 
     # controls
     layout["controls"].update(
-        Panel(Align.center("[bold yellow]Controls: [P] Play/Pause  [R] Reset  [S] Stop  [Q] Quit"))
+        Panel(Align.center("[bold yellow]Controls: [P] Play/Pause  [R] Reset  [Q] Quit"))
     )
     # footer
     layout["footer"].update(
@@ -115,69 +148,72 @@ def play_song(song_file, lyrics):
     paused = False
     stopped = False
 
-    with Live(console=console, refresh_per_second=10, screen=True) as live:
-        #draw initial layout first
-        initial_spec = spectrogram(audio[:step], width=40, height=None)
-        initial_frame = "\n".join(disc_frames[0])
-        initial_layout = build_layout(
-            os.path.basename(song_file),
-            get_current_lyrics(lyrics, 0),
-            initial_spec,
-            initial_frame
-        )
-        live.update(initial_layout)  
+    stdscr = init_input() 
 
-        #start playback after UI is ready
-        mixer.music.play()
-        
-        while not stopped and (mixer.music.get_busy() or paused):
-            key = get_key()
-            if key:
-                key = key.lower()
-                if key == 'p':  #play/pause
+    try:
+        with Live(console=console, refresh_per_second=10) as live:
+            #draw initial layout first
+            initial_spec = spectrogram(audio[:step], width=40, height=None)
+            initial_frame = "\n".join(disc_frames[0])
+            initial_layout = build_layout(
+                os.path.basename(song_file),
+                get_current_lyrics(lyrics, 0),
+                initial_spec,
+                initial_frame
+            )
+            live.update(initial_layout)  
+
+            #start playback after UI is ready
+            mixer.music.play()
+
+            while not stopped and (mixer.music.get_busy() or paused):
+                key = get_key(stdscr)  # get input (msvcrt or curses)
+                # === key controls ===
+                if key == "p":
                     if paused:
                         mixer.music.unpause()
                         paused = False
                     else:
                         mixer.music.pause()
                         paused = True
-                elif key == 'r':  #reset
+                elif key == "r":
                     mixer.music.stop()
                     mixer.music.play()
                     pos = 0
                     frame_idx = 0
                     paused = False
-                elif key == 'q': #Quit
+                elif key == "q":
                     mixer.music.stop()
                     stopped = True
                     break
-            if paused:
-                time.sleep(0.1)
-                continue
-            
-            
-            #Update audio chunk and UI
-            chunk = audio[pos:pos+step]
-            spec = spectrogram(chunk, width=40, height=None)
+
+                if paused:
+                    time.sleep(0.1)
+                    continue
                 
-            curr_ms = mixer.music.get_pos()
-            curr_sec = curr_ms / 1000.0
-            lyric_window = get_current_lyrics(lyrics, curr_sec)
-            
-            frame = disc_frames[frame_idx % len(disc_frames)]
-            frame_text = "\n".join(frame)   # turn list of strings into proper ASCII art
-            frame_idx += 1
-            layout = build_layout(
-                os.path.basename(song_file), 
-                lyric_window, 
-                spec,
-                frame_text
-            )
-            live.update(layout)
-            
-            pos += step
-            time.sleep(0.1)
-        
+                #Update audio chunk and UI
+                chunk = audio[pos:pos+step]
+                spec = spectrogram(chunk, width=40, height=None)
+                    
+                curr_ms = mixer.music.get_pos()
+                curr_sec = curr_ms / 1000.0
+                lyric_window = get_current_lyrics(lyrics, curr_sec)
+                
+                frame = disc_frames[frame_idx % len(disc_frames)]
+                frame_text = "\n".join(frame)   # turn list of strings into proper ASCII art
+                frame_idx += 1
+                layout = build_layout(
+                    os.path.basename(song_file), 
+                    lyric_window, 
+                    spec,
+                    frame_text
+                )
+                live.update(layout)
+                
+                pos += step
+                time.sleep(0.1)
+    finally:
+        cleanup_input(stdscr)  # restore terminal on unix
 
 def search_song(query):
     pattern = re.compile(query, re.IGNORECASE)
