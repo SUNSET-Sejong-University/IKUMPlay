@@ -132,6 +132,83 @@ def get_key(stdscr=None):
     return None
 
 
+def search_song(query):
+    pattern = re.compile(query, re.IGNORECASE)
+
+    results = sp.search(q=query, type="track", limit=20)
+    tracks = results["tracks"]["items"]
+
+    matches = []
+    for track in tracks:
+        title = track['name']
+        artists = ", ".join(artist['name'] for artist in track['artists'])
+        text = f"{title} {artists}"
+
+        if pattern.search(text):
+            matches.append((title, artists))
+    
+    return matches
+
+
+def remove_vocals(input_file, output_dir="downloads"):
+    os.makedirs(output_dir, exist_ok=True)
+    song_basename = os.path.splitext(os.path.basename(input_file)[0])
+    output_name = f"{song_basename}_instrumental.wav"
+
+    #Run Spleeter via Docker (2 stems: vocal + accompaniment)
+    cmd = [
+        "docker", "run", "--rm",
+        "-v", f"{os.path.abspath(input_file)}:/input/song.mp3",
+        "-v", f"{os.path.abspath(output_dir)}:/output",
+        "researchdeezer/spleeter",
+        "separate", "-i", "/input/song.mp3",
+        "-p", "spleeter:2stems",
+        "-o", "/output"
+    ]
+    print("🎶 Running Spleeter vocal remover...")
+    subprocess.run(cmd, check=True)
+
+    # Spleeter creates /output/song/accompaniment.wav
+    original_instrumental = os.path.join(output_dir, "song", "accompaniment.wav")
+    if os.path.exists(original_instrumental):
+        return original_instrumental
+    else:
+        raise FileNotFoundError("Spleeter did not produce the accompaniment file.")
+
+
+def download_audio(query, output_dir="downloads"):
+    os.makedirs(output_dir, exist_ok=True)
+    ydl_opts = {
+        "format": "bestaudio/best",
+        "noplaylist": True,
+        "quiet": True,
+        "outtmpl": f"{output_dir}/%(title)s.%(ext)s",
+        "postprocessors": [{
+            "key": "FFmpegExtractAudio",
+            "preferredcodec": "mp3",
+            "preferredquality": "192",
+        }],
+    }
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        print(f"🔎 Searching karaoke version: {query}")
+        info = ydl.extract_info(f"ytsearch1:{query} karaoke", download=True)
+        entry = info['entries'][0]
+        title = entry.get('title', '').lower()
+        filename = ydl.prepare_filename(entry)
+        mp3_file = os.path.splitext(filename)[0] + ".mp3"
+
+        if "karaoke" in title:
+            print("✅ Karaoke version found")
+            return mp3_file
+        else:
+            print("⚠️ Karaoke version not found, downloading original to remove vocals...")
+            # Run Spleeter vocal remover
+            instrumental = remove_vocals(mp3_file, output_dir=output_dir)
+            print("✅ Instrumental created:", instrumental)
+        return instrumental
+    
+
 def play_song(song_file, lyrics):
     # init mixer
     mixer.init()
@@ -224,88 +301,14 @@ def play_song(song_file, lyrics):
 
         # delete everything under downloads
         downloads_dir = "downloads"
+        temp_file = "temp.wav"
         if (os.path.exists(downloads_dir)):
             try:
                 shutil.rmtree(downloads_dir)
+                os.remove(temp_file)
                 print(f"🗑️ Deleted {downloads_dir} folder")
             except Exception as e:
                 print(f"⚠️ Could not delete {downloads_dir}: {e}")
-
-def search_song(query):
-    pattern = re.compile(query, re.IGNORECASE)
-
-    results = sp.search(q=query, type="track", limit=20)
-    tracks = results["tracks"]["items"]
-
-    matches = []
-    for track in tracks:
-        title = track['name']
-        artists = ", ".join(artist['name'] for artist in track['artists'])
-        text = f"{title} {artists}"
-
-        if pattern.search(text):
-            matches.append((title, artists))
-    
-    return matches
-
-
-def remove_vocals(input_file, output_dir="downloads"):
-    os.makedirs(output_dir, exist_ok=True)
-    song_basename = os.path.splitext(os.path.basename(input_file)[0])
-    output_name = f"{song_basename}_instrumental.wav"
-
-    #Run Spleeter via Docker (2 stems: vocal + accompaniment)
-    cmd = [
-        "docker", "run", "--rm",
-        "-v", f"{os.path.abspath(input_file)}:/input/song.mp3",
-        "-v", f"{os.path.abspath(output_dir)}:/output",
-        "researchdeezer/spleeter",
-        "separate", "-i", "/input/song.mp3",
-        "-p", "spleeter:2stems",
-        "-o", "/output"
-    ]
-    print("🎶 Running Spleeter vocal remover...")
-    subprocess.run(cmd, check=True)
-
-    # Spleeter creates /output/song/accompaniment.wav
-    original_instrumental = os.path.join(output_dir, "song", "accompaniment.wav")
-    if os.path.exists(original_instrumental):
-        return original_instrumental
-    else:
-        raise FileNotFoundError("Spleeter did not produce the accompaniment file.")
-
-
-def download_audio(query, output_dir="downloads"):
-    os.makedirs(output_dir, exist_ok=True)
-    ydl_opts = {
-        "format": "bestaudio/best",
-        "noplaylist": True,
-        "quiet": True,
-        "outtmpl": f"{output_dir}/%(title)s.%(ext)s",
-        "postprocessors": [{
-            "key": "FFmpegExtractAudio",
-            "preferredcodec": "mp3",
-            "preferredquality": "192",
-        }],
-    }
-
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        print(f"🔎 Searching karaoke version: {query}")
-        info = ydl.extract_info(f"ytsearch1:{query} karaoke", download=True)
-        entry = info['entries'][0]
-        title = entry.get('title', '').lower()
-        filename = ydl.prepare_filename(entry)
-        mp3_file = os.path.splitext(filename)[0] + ".mp3"
-
-        if "karaoke" in title:
-            print("✅ Karaoke version found")
-            return mp3_file
-        else:
-            print("⚠️ Karaoke version not found, downloading original to remove vocals...")
-            # Run Spleeter vocal remover
-            instrumental = remove_vocals(mp3_file, output_dir=output_dir)
-            print("✅ Instrumental created:", instrumental)
-        return instrumental
 
 
 def parse_lrc(lrc_text):
