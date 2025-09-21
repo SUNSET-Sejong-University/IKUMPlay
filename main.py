@@ -13,6 +13,8 @@ import spotipy
 import json
 from spotipy.oauth2 import SpotifyClientCredentials
 from syncedlyrics import *
+import subprocess
+import shutil
 
 #Detect platform
 ON_WINDOWS = os.name == "nt"
@@ -25,47 +27,12 @@ else:
 
 CLIENT_ID = "ab196aede1bc4799ae649981432632d0"
 CLIENT_SECRET = "e631f38732ba4c608f2982bdb41f9cb4"
+PITCH_LEVELS = [-2, -1, 0, 1, 2]  # semitone shifts
+current_pitch_index = 2           #always starting at 0 semitone
 
 sp = spotipy.Spotify(auth_manager=SpotifyClientCredentials(client_id=CLIENT_ID, client_secret=CLIENT_SECRET))
 
 console = Console()
-
-def init_input():
-    if not ON_WINDOWS:
-        import termios, tty, sys
-        import fcntl
-    
-        fd = sys.stdin.fileno()
-        old_settings = termios.tcgetattr(fd)
-        tty.setcbreak(fd)
-
-        fl = fcntl.fcntl(fd, fcntl.F_GETFL)
-        fcntl.fcntl(fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
-        return (fd, old_settings, fl)
-    return None
-
-def cleanup_input(stdscr):
-    if not ON_WINDOWS and stdscr:
-        import termios, fcntl
-        fd, old_settings, fl = stdscr
-        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-        fcntl.fcntl(fd, fcntl.F_SETFL, fl)
-
-def get_key(stdscr=None):
-    if ON_WINDOWS:
-        if msvcrt.kbhit():
-            try:
-                return msvcrt.getch().decode("utf-8").lower()
-            except UnicodeDecodeError:
-                return None
-    else:
-        try:
-            ch = sys.stdin.read(1)
-            if ch:
-                return ch.lower()
-        except (IOError, OSError):
-            pass
-    return None
 
 def spectrogram(data, width=40, height=None):
     """Turn audio data into ASCII spectrogram bars."""  
@@ -125,6 +92,46 @@ def build_layout(song_name, lyrics, spectro_text, disc_frame):
     return layout
 
 
+def init_input():
+    if not ON_WINDOWS:
+        import termios, tty, sys
+        import fcntl
+    
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+        tty.setcbreak(fd)
+
+        fl = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
+        return (fd, old_settings, fl)
+    return None
+
+
+def cleanup_input(stdscr):
+    if not ON_WINDOWS and stdscr:
+        import termios, fcntl
+        fd, old_settings, fl = stdscr
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+        fcntl.fcntl(fd, fcntl.F_SETFL, fl)
+
+
+def get_key(stdscr=None):
+    if ON_WINDOWS:
+        if msvcrt.kbhit():
+            try:
+                return msvcrt.getch().decode("utf-8").lower()
+            except UnicodeDecodeError:
+                return None
+    else:
+        try:
+            ch = sys.stdin.read(1)
+            if ch:
+                return ch.lower()
+        except (IOError, OSError):
+            pass
+    return None
+
+
 def play_song(song_file, lyrics):
     # init mixer
     mixer.init()
@@ -169,20 +176,20 @@ def play_song(song_file, lyrics):
             while not stopped and (mixer.music.get_busy() or paused):
                 key = get_key(stdscr)  # get input (msvcrt or curses)
                 # === key controls ===
-                if key == "p":
+                if key == "p":              # play/pause toggle
                     if paused:
                         mixer.music.unpause()
                         paused = False
                     else:
                         mixer.music.pause()
                         paused = True
-                elif key == "r":
+                elif key == "r":            # rewind to start
                     mixer.music.stop()
                     mixer.music.play()
                     pos = 0
                     frame_idx = 0
                     paused = False
-                elif key == "q":
+                elif key == "q":            # quit player
                     mixer.music.stop()
                     stopped = True
                     break
@@ -215,6 +222,15 @@ def play_song(song_file, lyrics):
     finally:
         cleanup_input(stdscr)  # restore terminal on unix
 
+        # delete everything under downloads
+        downloads_dir = "downloads"
+        if (os.path.exists(downloads_dir)):
+            try:
+                shutil.rmtree(downloads_dir)
+                print(f"🗑️ Deleted {downloads_dir} folder")
+            except Exception as e:
+                print(f"⚠️ Could not delete {downloads_dir}: {e}")
+
 def search_song(query):
     pattern = re.compile(query, re.IGNORECASE)
 
@@ -232,9 +248,35 @@ def search_song(query):
     
     return matches
 
+
+def remove_vocals(input_file, output_dir="downloads"):
+    os.makedirs(output_dir, exist_ok=True)
+    song_basename = os.path.splitext(os.path.basename(input_file)[0])
+    output_name = f"{song_basename}_instrumental.wav"
+
+    #Run Spleeter via Docker (2 stems: vocal + accompaniment)
+    cmd = [
+        "docker", "run", "--rm",
+        "-v", f"{os.path.abspath(input_file)}:/input/song.mp3",
+        "-v", f"{os.path.abspath(output_dir)}:/output",
+        "researchdeezer/spleeter",
+        "separate", "-i", "/input/song.mp3",
+        "-p", "spleeter:2stems",
+        "-o", "/output"
+    ]
+    print("🎶 Running Spleeter vocal remover...")
+    subprocess.run(cmd, check=True)
+
+    # Spleeter creates /output/song/accompaniment.wav
+    original_instrumental = os.path.join(output_dir, "song", "accompaniment.wav")
+    if os.path.exists(original_instrumental):
+        return original_instrumental
+    else:
+        raise FileNotFoundError("Spleeter did not produce the accompaniment file.")
+
+
 def download_audio(query, output_dir="downloads"):
     os.makedirs(output_dir, exist_ok=True)
- 
     ydl_opts = {
         "format": "bestaudio/best",
         "noplaylist": True,
@@ -248,11 +290,22 @@ def download_audio(query, output_dir="downloads"):
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        print(f"🔎 Searching and downloading: {query}")
+        print(f"🔎 Searching karaoke version: {query}")
         info = ydl.extract_info(f"ytsearch1:{query} karaoke", download=True)
-        filename = ydl.prepare_filename(info['entries'][0])
+        entry = info['entries'][0]
+        title = entry.get('title', '').lower()
+        filename = ydl.prepare_filename(entry)
         mp3_file = os.path.splitext(filename)[0] + ".mp3"
-        return mp3_file
+
+        if "karaoke" in title:
+            print("✅ Karaoke version found")
+            return mp3_file
+        else:
+            print("⚠️ Karaoke version not found, downloading original to remove vocals...")
+            # Run Spleeter vocal remover
+            instrumental = remove_vocals(mp3_file, output_dir=output_dir)
+            print("✅ Instrumental created:", instrumental)
+        return instrumental
 
 
 def parse_lrc(lrc_text):
