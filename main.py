@@ -27,8 +27,6 @@ else:
 
 CLIENT_ID = "ab196aede1bc4799ae649981432632d0"
 CLIENT_SECRET = "e631f38732ba4c608f2982bdb41f9cb4"
-PITCH_LEVELS = [-2, -1, 0, 1, 2]  # semitone shifts
-current_pitch_index = 2           #always starting at 0 semitone
 
 sp = spotipy.Spotify(auth_manager=SpotifyClientCredentials(client_id=CLIENT_ID, client_secret=CLIENT_SECRET))
 
@@ -72,7 +70,7 @@ def build_layout(song_name, lyrics, spectro_text, disc_frame):
     )
 
     layout["spectro"].update(
-        Panel(Align.center(spectro_text), title="Waveform", border_style="cyan")
+        Panel(Align.center(spectro_text), title="", border_style="cyan")
     )
     layout["lyrics"].update(
         Panel("\n".join(lyrics), title="Lyrics", border_style="magenta")
