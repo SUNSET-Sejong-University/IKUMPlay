@@ -73,7 +73,7 @@ rm -rf downloads/*
 ---
 
 ## 📜 Credits
-Designed and Developed by Tsetsegchimeg, 최종우 and Prithwis Das
+Designed and Developed by Tsetsegchimeg, 최종우, Azizbek Arzikulov and Prithwis Das
 
 ---
 
