@@ -56,6 +56,7 @@ You will be prompted to enter the **song name**. IKUMPlay will:
 IKUMPlay/
 │── main.py               # Entry point
 │── downloads/            # Temporary downloaded files
+|── ascii_arts.json       # File comprising of the ascii arts used (Derived from: https://github.com/Sr-vZ/PyAudioPlayer/)
 │── requirements.txt      # Python dependencies
 │── README.md             # This file
 ```
